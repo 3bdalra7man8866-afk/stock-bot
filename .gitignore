@@ -1,0 +1,4 @@
+.env
+users_database.json
+__pycache__/
+*.pyc
