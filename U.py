@@ -34,8 +34,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 SECRET_KEY = os.getenv("SECRET_KEY")
 USERS_FILE = os.getenv("USERS_FILE", "users_database.json")
-STORE_LINK = os.getenv("STORE_LINK", "https://shadeedsa.com/")
-SNAP_LINK = os.getenv("SNAP_LINK", "https://www.snapchat.com/add/t6x")
+STORE_LINK = os.getenv("STORE_LINK", "@aqk1992")
+SNAP_LINK = os.getenv("SNAP_LINK", "@aqk1992")
 
 OLD_CODES = [
     "STK-MTc3MjM4MzU2MDo3NGI3MjI2YThlMzA", "STK-MTc3MjM5NjQ4MDpjMjQxY2E1YTViY2Y",
@@ -227,7 +227,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     elif text == "⚙️ الدعم والاشتراك":
-        await update.message.reply_text(f"🛒 **المتجر:** {STORE_LINK}\n👻 **الدعم الفني:** {SNAP_LINK}")
+        await update.message.reply_text(f"**الدعم الفني:** {SNAP_LINK}")
 
     elif uid == ADMIN_ID and text == "🛠 لوحة التحكم":
         count = len(load_users())
