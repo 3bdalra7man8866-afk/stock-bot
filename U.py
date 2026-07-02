@@ -146,9 +146,87 @@ def calculate_vwap(quote):
         cum_v += v
     return cum_pv / cum_v if cum_v > 0 else None
 
+def fill_gaps(values):
+    """ملء القيم المفقودة بآخر قيمة صالحة."""
+    out = []
+    last = None
+    for v in values:
+        if v is not None:
+            last = v
+        out.append(last)
+    return out
+
+def sma(data, period):
+    if len(data) < period:
+        return None
+    return sum(data[-period:]) / period
+
+def ema_series(data, period):
+    if len(data) < period:
+        return []
+    k = 2 / (period + 1)
+    ema = [None] * (period - 1) + [sum(data[:period]) / period]
+    for price in data[period:]:
+        ema.append(price * k + ema[-1] * (1 - k))
+    return ema
+
+def rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return None
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i-1]
+        gains.append(max(change, 0))
+        losses.append(abs(min(change, 0)))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def compute_macd(prices):
+    ema12 = ema_series(prices, 12)
+    ema26 = ema_series(prices, 26)
+    macd_line = [a-b if a is not None and b is not None else None for a,b in zip(ema12, ema26)]
+    start = next((i for i,v in enumerate(macd_line) if v is not None), None)
+    if start is None:
+        return None, None, None
+    macd_vals = macd_line[start:]
+    signal_vals = ema_series(macd_vals, 9)
+    if not signal_vals or signal_vals[-1] is None:
+        return None, None, None
+    return macd_vals[-1], signal_vals[-1], macd_vals[-1] - signal_vals[-1]
+
+def momentum(prices, period=10):
+    if len(prices) < period + 1:
+        return None
+    return ((prices[-1] - prices[-period-1]) / prices[-period-1]) * 100
+
+def liquidity_flow(closes, volumes, period=14):
+    if len(closes) < period + 1:
+        return None, None
+    inflow = 0.0
+    outflow = 0.0
+    for i in range(-period, 0):
+        c = closes[i]
+        prev_c = closes[i-1]
+        v = volumes[i]
+        if c is None or prev_c is None or v is None or v <= 0:
+            continue
+        if c > prev_c:
+            inflow += v
+        elif c < prev_c:
+            outflow += v
+    return inflow, outflow
+
 async def fetch_analysis(symbol, type_label="تحليل"):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=5d"
+    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1mo"
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, timeout=12) as response:
@@ -189,17 +267,56 @@ async def fetch_analysis(symbol, type_label="تحليل"):
                     vwap_dist = 0
                     vwap_signal = "⚠️ لا توجد بيانات حجم كافية"
 
+                # 📈 المؤشرات الفنية الإضافية
+                closes = fill_gaps(quote.get('close', []))
+                volumes = fill_gaps(quote.get('volume', []))
+
+                rsi_val = rsi(closes)
+                macd_line, macd_signal, macd_hist = compute_macd(closes)
+                sma20 = sma(closes, 20)
+                sma50 = sma(closes, 50)
+                ema20_val = ema_series(closes, 20)[-1] if len(closes) >= 20 else None
+                mom = momentum(closes)
+                inflow, outflow = liquidity_flow(closes, volumes)
+                if inflow is not None:
+                    total_flow = inflow + outflow
+                    if total_flow > 0:
+                        in_pct = (inflow / total_flow) * 100
+                        out_pct = (outflow / total_flow) * 100
+                        liquidity_signal = f"🟢 سيولة داخلة {in_pct:.1f}% | 🔴 خارجة {out_pct:.1f}%"
+                    else:
+                        liquidity_signal = "⚪ لا توجد بيانات سيولة كافية"
+                else:
+                    liquidity_signal = "⚪ لا توجد بيانات سيولة كافية"
+
                 return {
                     "symbol": symbol.upper(), "price": price, "change": round(change, 2),
                     "accuracy": accuracy, "news": news, "rec": rec, "halal": halal_status,
                     "t1": round(price * 1.015, 2), "t2": round(price * 1.038, 2), "t3": round(price * 1.06, 2),
                     "stop": round(price * 0.96, 2),
-                    "vwap": round(vwap, 2), "vwap_dist": round(vwap_dist, 2), "vwap_signal": vwap_signal
+                    "vwap": round(vwap, 2), "vwap_dist": round(vwap_dist, 2), "vwap_signal": vwap_signal,
+                    "rsi": round(rsi_val, 2) if rsi_val is not None else "N/A",
+                    "macd": round(macd_line, 3) if macd_line is not None else "N/A",
+                    "macd_signal": round(macd_signal, 3) if macd_signal is not None else "N/A",
+                    "macd_hist": round(macd_hist, 3) if macd_hist is not None else "N/A",
+                    "sma20": round(sma20, 2) if sma20 is not None else "N/A",
+                    "sma50": round(sma50, 2) if sma50 is not None else "N/A",
+                    "ema20": round(ema20_val, 2) if ema20_val is not None else "N/A",
+                    "momentum": round(mom, 2) if mom is not None else "N/A",
+                    "liquidity_signal": liquidity_signal
                 }
         except: return None
 
 def format_report(d):
     vwap_line = f"📊 **VWAP:** `${d['vwap']}` ({d['vwap_dist']}%) | {d['vwap_signal']}\n"
+    indicators = (
+        f"📈 **المؤشرات الفنية:**\n"
+        f"• **RSI(14):** `{d['rsi']}`\n"
+        f"• **MACD:** `{d['macd']}` | **Signal:** `{d['macd_signal']}` | **Hist:** `{d['macd_hist']}`\n"
+        f"• **SMA20:** `{d['sma20']}` | **SMA50:** `{d['sma50']}` | **EMA20:** `{d['ema20']}`\n"
+        f"• **الزخم (10):** `{d['momentum']}%`\n"
+        f"• **السيولة:** {d['liquidity_signal']}\n"
+    )
     return (f"📊 **تقرير فني: {d['symbol']}** | {d['halal']}\n"
             f"───────────────────\n"
             f"💰 **السعر:** `${d['price']}` ({d['change']}%)\n"
@@ -207,6 +324,7 @@ def format_report(d):
             f"🎯 **نسبة النجاح:** `{d['accuracy']}%` (واقعية)\n"
             f"📰 **الأخبار:** `{d['news']}`\n"
             f"{vwap_line}"
+            f"{indicators}"
             f"───────────────────\n"
             f"✅ **الأهداف المحدثة:**\n"
             f"🎯 هدف 1: `${d['t1']}` | 🎯 هدف 2: `${d['t2']}`\n"
