@@ -89,6 +89,22 @@ def is_subscribed(user_id):
     return str(user_id) in users and time.time() < float(users[str(user_id)])
 
 # ================== محرك التحليل المطور V48 ==================
+def calculate_vwap(quote):
+    """حساب Volume Weighted Average Price من بيانات الشموع."""
+    highs = quote.get('high', [])
+    lows = quote.get('low', [])
+    closes = quote.get('close', [])
+    volumes = quote.get('volume', [])
+    cum_pv = 0.0
+    cum_v = 0.0
+    for h, l, c, v in zip(highs, lows, closes, volumes):
+        if h is None or l is None or c is None or v is None or v == 0:
+            continue
+        typical = (h + l + c) / 3.0
+        cum_pv += typical * v
+        cum_v += v
+    return cum_pv / cum_v if cum_v > 0 else None
+
 async def fetch_analysis(symbol, type_label="تحليل"):
     headers = {'User-Agent': 'Mozilla/5.0'}
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=5d"
@@ -99,7 +115,8 @@ async def fetch_analysis(symbol, type_label="تحليل"):
                 data = await response.json()
                 res = data['chart']['result'][0]
                 price = res['meta']['regularMarketPrice']
-                change = ((price - res['meta']['previousClose']) / res['meta']['previousClose']) * 100
+                prev_close = res['meta'].get('previousClose') or price
+                change = ((price - prev_close) / prev_close) * 100
                 accuracy = random.randint(64, 78)
                 
                 # ⚖️ إضافة فلتر شرعي بسيط (محاكاة ذكية)
@@ -115,21 +132,40 @@ async def fetch_analysis(symbol, type_label="تحليل"):
                     rec = "⏳ الحالة: مراقبة (Wait)"
                     news = "⚪ استقرار بانتظار اتجاه"
 
+                # 📊 حساب استراتيجية VWAP
+                quote = res['indicators']['quote'][0]
+                vwap = calculate_vwap(quote)
+                if vwap:
+                    vwap_dist = ((price - vwap) / vwap) * 100
+                    if price > vwap * 1.005:
+                        vwap_signal = "📈 السعر فوق VWAP — ضغط شرائي"
+                    elif price < vwap * 0.995:
+                        vwap_signal = "📉 السعر تحت VWAP — ضغط بيعي"
+                    else:
+                        vwap_signal = "⚖️ السعر قريب من VWAP — توازن"
+                else:
+                    vwap = 0
+                    vwap_dist = 0
+                    vwap_signal = "⚠️ لا توجد بيانات حجم كافية"
+
                 return {
                     "symbol": symbol.upper(), "price": price, "change": round(change, 2),
                     "accuracy": accuracy, "news": news, "rec": rec, "halal": halal_status,
                     "t1": round(price * 1.015, 2), "t2": round(price * 1.038, 2), "t3": round(price * 1.06, 2),
-                    "stop": round(price * 0.96, 2)
+                    "stop": round(price * 0.96, 2),
+                    "vwap": round(vwap, 2), "vwap_dist": round(vwap_dist, 2), "vwap_signal": vwap_signal
                 }
         except: return None
 
 def format_report(d):
+    vwap_line = f"📊 **VWAP:** `${d['vwap']}` ({d['vwap_dist']}%) | {d['vwap_signal']}\n"
     return (f"📊 **تقرير فني: {d['symbol']}** | {d['halal']}\n"
             f"───────────────────\n"
             f"💰 **السعر:** `${d['price']}` ({d['change']}%)\n"
             f"📢 **{d['rec']}**\n"
             f"🎯 **نسبة النجاح:** `{d['accuracy']}%` (واقعية)\n"
             f"📰 **الأخبار:** `{d['news']}`\n"
+            f"{vwap_line}"
             f"───────────────────\n"
             f"✅ **الأهداف المحدثة:**\n"
             f"🎯 هدف 1: `${d['t1']}` | 🎯 هدف 2: `${d['t2']}`\n"
