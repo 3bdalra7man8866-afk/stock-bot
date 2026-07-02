@@ -36,6 +36,8 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 USERS_FILE = os.getenv("USERS_FILE", "users_database.json")
 STORE_LINK = os.getenv("STORE_LINK", "@aqk1992")
 SNAP_LINK = os.getenv("SNAP_LINK", "@aqk1992")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 OLD_CODES = [
     "STK-MTc3MjM4MzU2MDo3NGI3MjI2YThlMzA", "STK-MTc3MjM5NjQ4MDpjMjQxY2E1YTViY2Y",
@@ -51,17 +53,56 @@ OLD_CODES = [
 
 LEAD_STOCKS = ['NVDA', 'TSLA', 'AAPL', 'AMD', 'MSFT', 'META', 'AMZN', 'NFLX', 'GOOGL', 'PLTR', 'COIN', 'MARA']
 
-# ================== نظام الذاكرة ==================
-def load_users():
-    if not os.path.exists(USERS_FILE): return {}
+# ================== نظام الذاكرة (Supabase) ==================
+async def load_users():
+    """تحميل المشتركين من Supabase أو ملف محلي احتياطياً."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        if not os.path.exists(USERS_FILE): return {}
+        try:
+            with open(USERS_FILE, "r", encoding='utf-8') as f:
+                return json.load(f)
+        except: return {}
+    url = f"{SUPABASE_URL}/rest/v1/users?select=user_id,expiry"
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
     try:
-        with open(USERS_FILE, "r", encoding='utf-8') as f:
-            return json.load(f)
-    except: return {}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=12) as resp:
+                if resp.status == 200:
+                    rows = await resp.json()
+                    return {row["user_id"]: row["expiry"] for row in rows}
+                print("Supabase load_users error status:", resp.status)
+    except Exception as e:
+        print("Supabase load_users error:", e)
+    return {}
 
-def save_users(data):
-    with open(USERS_FILE, "w", encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+async def save_user(user_id, expiry):
+    """حفظ/تحديث مشترك واحد في Supabase أو ملف محلي احتياطياً."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        users = {}
+        if os.path.exists(USERS_FILE):
+            try:
+                with open(USERS_FILE, "r", encoding='utf-8') as f:
+                    users = json.load(f)
+            except: pass
+        users[str(user_id)] = expiry
+        with open(USERS_FILE, "w", encoding='utf-8') as f:
+            json.dump(users, f, ensure_ascii=False, indent=4)
+        return True
+    url = f"{SUPABASE_URL}/rest/v1/users?on_conflict=user_id"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates"
+    }
+    payload = {"user_id": str(user_id), "expiry": float(expiry)}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=12) as resp:
+                return resp.status in (200, 201)
+    except Exception as e:
+        print("Supabase save_user error:", e)
+        return False
 
 # ================== محرك التشفير ==================
 def verify_secure_code(code):
@@ -83,9 +124,9 @@ def generate_secure_code(days):
     token = base64.urlsafe_b64encode(f"{expiry}:{sig}".encode()).decode().replace("=", "")
     return f"STK-{token}"
 
-def is_subscribed(user_id):
+async def is_subscribed(user_id):
     if user_id == ADMIN_ID: return True
-    users = load_users()
+    users = await load_users()
     return str(user_id) in users and time.time() < float(users[str(user_id)])
 
 # ================== محرك التحليل المطور V48 ==================
@@ -176,7 +217,7 @@ def format_report(d):
 # ================== معالجة الأوامر ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not is_subscribed(uid):
+    if not await is_subscribed(uid):
         await update.message.reply_text(f"⚠️ **الاشتراك غير مفعل.**\nرابط المتجر: {STORE_LINK}")
         return
 
@@ -209,12 +250,12 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("STK-"):
         ok, exp = verify_secure_code(text)
         if ok:
-            users = load_users(); users[str(uid)] = exp; save_users(users)
+            await save_user(uid, exp)
             await update.message.reply_text("✅ تم تفعيل اشتراكك بنجاح! اضغط /start")
         else: await update.message.reply_text(exp)
         return
 
-    if not is_subscribed(uid): return
+    if not await is_subscribed(uid): return
 
     if text in ["📈 أفضل فرص الارتفاع", "📉 تنبيهات الهبوط"]:
         wait = await update.message.reply_text("📡 فحص السوق بناءً على الفلاتر الجديدة...")
@@ -266,7 +307,7 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"**الدعم الفني:** {SNAP_LINK}")
 
     elif uid == ADMIN_ID and text == "🛠 لوحة التحكم":
-        count = len(load_users())
+        count = len(await load_users())
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎫 شهر", callback_data="gen_1m"), InlineKeyboardButton("🎫 سنة", callback_data="gen_1y")]])
         await update.message.reply_text(f"👥 عدد المشتركين: {count}", reply_markup=kb)
 
