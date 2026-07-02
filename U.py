@@ -446,6 +446,19 @@ async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = await fetch_analysis(symbol)
             if res: await update.message.reply_text(format_report(res), parse_mode="Markdown")
 
+async def add_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        return
+    try:
+        target_id = int(context.args[0])
+        days = int(context.args[1])
+        expiry = int(time.time()) + (days * 86400)
+        await save_user(target_id, expiry)
+        await update.message.reply_text(f"✅ تم إضافة المستخدم `{target_id}` لمدة {days} يوم.\nتاريخ الانتهاء: `{expiry}`", parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text("⚠️ الاستخدام:\n`/adduser user_id days`\nمثال: `/adduser 123456789 30`", parse_mode="Markdown")
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id == ADMIN_ID:
@@ -456,6 +469,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("adduser", add_user_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.run_polling(drop_pending_updates=True)
