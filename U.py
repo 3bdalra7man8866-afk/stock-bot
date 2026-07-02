@@ -451,7 +451,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.from_user.id == ADMIN_ID:
         days = 30 if q.data == "gen_1m" else 365
         code = generate_secure_code(days)
-        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🎫 كود جديد:\n`{code}`")
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"{code}")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
