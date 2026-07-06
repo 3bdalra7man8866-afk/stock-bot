@@ -104,6 +104,177 @@ async def save_user(user_id, expiry):
         print("Supabase save_user error:", e)
         return False
 
+# ================== نظام التنبيهات ==================
+ALERT_STRATEGIES = {
+    "volume_spike": "🚀 انفجار حجم + CMF إيجابي",
+    "rsi_buy": "📉 RSI في منطقة تشبع بيعي (≤30)",
+    "rsi_sell": "📈 RSI في منطقة تشبع شرائي (≥70)",
+    "macd_bullish": "📊 MACD إيجابي (Hist > 0)",
+    "vwap_breakout": "📈 اختراق VWAP للأعلى",
+    "cmf_positive": "💰 CMF إيجابي"
+}
+
+ALERT_COOLDOWN_SECONDS = 4 * 3600  # لا يكرر نفس التنبيه قبل 4 ساعات
+
+async def add_alert(user_id, symbol, strategy):
+    """إضافة تنبيه جديد للمستخدم."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    url = f"{SUPABASE_URL}/rest/v1/alerts"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates"
+    }
+    payload = {"user_id": str(user_id), "symbol": symbol.upper(), "strategy": strategy, "active": True}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=12) as resp:
+                return resp.status in (200, 201)
+    except Exception as e:
+        print("add_alert error:", e)
+        return False
+
+async def list_alerts(user_id):
+    """جلب تنبيهات المستخدم النشطة."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    url = f"{SUPABASE_URL}/rest/v1/alerts?user_id=eq.{user_id}&active=eq.true&select=id,symbol,strategy,last_alert_at"
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=12) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        print("list_alerts error:", e)
+    return []
+
+async def delete_alert(user_id, symbol, strategy):
+    """حذف تنبيه محدد."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    url = f"{SUPABASE_URL}/rest/v1/alerts?user_id=eq.{user_id}&symbol=eq.{symbol.upper()}&strategy=eq.{strategy}"
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(url, headers=headers, timeout=12) as resp:
+                return resp.status in (200, 204)
+    except Exception as e:
+        print("delete_alert error:", e)
+        return False
+
+async def get_all_active_alerts():
+    """جلب كل التنبيهات النشطة لجميع المستخدمين (للـ scheduler)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    url = f"{SUPABASE_URL}/rest/v1/alerts?active=eq.true&select=id,user_id,symbol,strategy,last_alert_at"
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=12) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        print("get_all_active_alerts error:", e)
+    return []
+
+async def update_alert_last_alert(alert_id):
+    """تحديث وقت آخر تنبيه."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    url = f"{SUPABASE_URL}/rest/v1/alerts?id=eq.{alert_id}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+    payload = {"last_alert_at": datetime.now(pytz.utc).isoformat()}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, headers=headers, json=payload, timeout=12) as resp:
+                return resp.status in (200, 204)
+    except Exception as e:
+        print("update_alert_last_alert error:", e)
+        return False
+
+def evaluate_alert_strategy(d, strategy):
+    """تقييم إذا كانت إشارة الاستراتيجية متحققة حالياً."""
+    if strategy == "volume_spike":
+        cmf_val = d.get('cmf')
+        return d.get('volume_ratio', 0) >= 3.0 and isinstance(cmf_val, (int, float)) and cmf_val > 0
+    if strategy == "rsi_buy":
+        rsi_val = d.get('rsi')
+        return isinstance(rsi_val, (int, float)) and rsi_val <= 30
+    if strategy == "rsi_sell":
+        rsi_val = d.get('rsi')
+        return isinstance(rsi_val, (int, float)) and rsi_val >= 70
+    if strategy == "macd_bullish":
+        hist = d.get('macd_hist')
+        return isinstance(hist, (int, float)) and hist > 0
+    if strategy == "vwap_breakout":
+        return d.get('vwap_signal', '').startswith("📈")
+    if strategy == "cmf_positive":
+        cmf_val = d.get('cmf')
+        return isinstance(cmf_val, (int, float)) and cmf_val > 0
+    return False
+
+def alert_message(d, strategy):
+    """صياغة رسالة التنبيه."""
+    title = ALERT_STRATEGIES.get(strategy, strategy)
+    return (f"🔔 **تنبيه: {d['symbol']}**\n"
+            f"{title}\n"
+            f"───────────────────\n"
+            f"💰 **السعر:** `${d['price']}` ({d['change']}%)\n"
+            f"📊 **VWAP:** `${d['vwap']}` | {d['vwap_signal']}\n"
+            f"📈 **RSI:** `{d['rsi']}` | **MACD Hist:** `{d['macd_hist']}`\n"
+            f"🚀 **Volume Ratio:** `{d['volume_ratio']}x` | **CMF:** `{d['cmf']}`\n"
+            f"───────────────────")
+
+async def check_alerts(app):
+    """فحص جميع التنبيهات وإرسالها للمشتركين."""
+    try:
+        alerts = await get_all_active_alerts()
+        if not alerts:
+            return
+        by_symbol = {}
+        for a in alerts:
+            by_symbol.setdefault(a['symbol'].upper(), []).append(a)
+        for symbol, alert_list in by_symbol.items():
+            d = await fetch_analysis(symbol)
+            if not d:
+                continue
+            for a in alert_list:
+                strategy = a['strategy']
+                if not evaluate_alert_strategy(d, strategy):
+                    continue
+                # التحقق من فترة الـ cooldown
+                last_str = a.get('last_alert_at')
+                now = datetime.now(pytz.utc)
+                if last_str:
+                    try:
+                        last_dt = datetime.fromisoformat(last_str.replace('Z', '+00:00'))
+                        if (now - last_dt).total_seconds() < ALERT_COOLDOWN_SECONDS:
+                            continue
+                    except Exception:
+                        pass
+                try:
+                    await app.bot.send_message(chat_id=a['user_id'], text=alert_message(d, strategy), parse_mode="Markdown")
+                    await update_alert_last_alert(a['id'])
+                except Exception as e:
+                    print("send alert error:", e)
+    except Exception as e:
+        print("check_alerts error:", e)
+
+async def alert_scheduler(app):
+    """تشغيل دوري لفحص التنبيهات كل 15 دقيقة."""
+    await asyncio.sleep(60)  # انتظار دقيقة بعد بدء البوت
+    while True:
+        await check_alerts(app)
+        await asyncio.sleep(900)  # 15 دقيقة
+
 # ================== محرك التشفير ==================
 def verify_secure_code(code):
     if code in OLD_CODES: return True, int(time.time()) + (30 * 86400)
@@ -505,6 +676,53 @@ async def add_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("⚠️ الاستخدام:\n`/adduser user_id days`\nمثال: `/adduser 123456789 30`", parse_mode="Markdown")
 
+async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not await is_subscribed(uid):
+        await update.message.reply_text("⚠️ **الاشتراك غير مفعل.**")
+        return
+    try:
+        symbol = context.args[0].upper()
+        strategy = context.args[1].lower()
+        if strategy not in ALERT_STRATEGIES:
+            strategies = "\n".join([f"`{k}` - {v}" for k, v in ALERT_STRATEGIES.items()])
+            await update.message.reply_text(f"⚠️ الاستراتيجية غير مدعومة.\nالاستراتيجيات المتاحة:\n{strategies}", parse_mode="Markdown")
+            return
+        if await add_alert(uid, symbol, strategy):
+            await update.message.reply_text(f"✅ تم تفعيل التنبيه:\n`{symbol}` — {ALERT_STRATEGIES[strategy]}", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ حدث خطأ أثناء حفظ التنبيه. تأكد من إنشاء جدول `alerts` في Supabase.")
+    except Exception:
+        await update.message.reply_text("⚠️ الاستخدام:\n`/alert SYMBOL STRATEGY`\nمثال: `/alert AAPL volume_spike`\n\nلعرض الاستراتيجيات: `/strategies`", parse_mode="Markdown")
+
+async def delalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        symbol = context.args[0].upper()
+        strategy = context.args[1].lower()
+        if await delete_alert(uid, symbol, strategy):
+            await update.message.reply_text(f"✅ تم حذف التنبيه: `{symbol}` — `{strategy}`", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("⚠️ لم يتم حذف التنبيه.")
+    except Exception:
+        await update.message.reply_text("⚠️ الاستخدام:\n`/delalert SYMBOL STRATEGY`\nمثال: `/delalert AAPL volume_spike`", parse_mode="Markdown")
+
+async def myalerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    alerts = await list_alerts(uid)
+    if not alerts:
+        await update.message.reply_text("📭 ليس لديك تنبيهات نشطة.\nللإضافة: `/alert SYMBOL STRATEGY`", parse_mode="Markdown")
+        return
+    lines = []
+    for a in alerts:
+        title = ALERT_STRATEGIES.get(a['strategy'], a['strategy'])
+        lines.append(f"• `{a['symbol']}` — {title}")
+    await update.message.reply_text("🔔 **تنبيهاتك النشطة:**\n" + "\n".join(lines) + "\n\nللحذف: `/delalert SYMBOL STRATEGY`", parse_mode="Markdown")
+
+async def strategies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lines = [f"`{k}` — {v}" for k, v in ALERT_STRATEGIES.items()]
+    await update.message.reply_text("📋 **الاستراتيجيات المتاحة للتنبيهات:**\n\n" + "\n".join(lines) + "\n\nللاشتراك: `/alert SYMBOL STRATEGY`", parse_mode="Markdown")
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     if q.from_user.id == ADMIN_ID:
@@ -512,10 +730,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = generate_secure_code(days)
         await context.bot.send_message(chat_id=ADMIN_ID, text=f"{code}")
 
+async def init_scheduler(app):
+    """بدء scheduler التنبيهات بعد إعداد البوت."""
+    asyncio.create_task(alert_scheduler(app))
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(init_scheduler).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("adduser", add_user_cmd))
+    app.add_handler(CommandHandler("alert", alert_cmd))
+    app.add_handler(CommandHandler("delalert", delalert_cmd))
+    app.add_handler(CommandHandler("myalerts", myalerts_cmd))
+    app.add_handler(CommandHandler("strategies", strategies_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.run_polling(drop_pending_updates=True)
