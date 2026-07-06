@@ -224,6 +224,33 @@ def liquidity_flow(closes, volumes, period=14):
             outflow += v
     return inflow, outflow
 
+def volume_spike(volumes, period=20):
+    """التحقق من ارتفاع الحجم الحالي بنسبة 200% فوق متوسط آخر N شمعة."""
+    if len(volumes) < period + 2:
+        return False, 0, 0, 0
+    avg = sum(volumes[-period-1:-1]) / period
+    curr = volumes[-1] if volumes[-1] else volumes[-2]
+    ratio = (curr / avg) if avg > 0 else 0
+    return ratio >= 3.0, curr, avg, ratio
+
+def cmf(quote, period=20):
+    """حساب مؤشر Chaikin Money Flow."""
+    highs = fill_gaps(quote.get('high', []))
+    lows = fill_gaps(quote.get('low', []))
+    closes = fill_gaps(quote.get('close', []))
+    volumes = fill_gaps(quote.get('volume', []))
+    if len(highs) < period:
+        return None
+    mfvol = 0.0
+    vol = 0.0
+    for h, l, c, v in zip(highs[-period:], lows[-period:], closes[-period:], volumes[-period:]):
+        if h is None or l is None or c is None or v is None or v <= 0 or h == l:
+            continue
+        mfm = ((c - l) - (h - c)) / (h - l)
+        mfvol += mfm * v
+        vol += v
+    return mfvol / vol if vol > 0 else None
+
 async def fetch_analysis(symbol, type_label="تحليل"):
     headers = {'User-Agent': 'Mozilla/5.0'}
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1h&range=1mo"
@@ -267,9 +294,19 @@ async def fetch_analysis(symbol, type_label="تحليل"):
                     vwap_dist = 0
                     vwap_signal = "⚠️ لا توجد بيانات حجم كافية"
 
+                # 🚀 استراتيجية انفجار الحجم + CMF
+                volumes = fill_gaps(quote.get('volume', []))
+                vol_spike, curr_vol, avg_vol, vol_ratio = volume_spike(volumes)
+                cmf_val = cmf(quote)
+                if vol_spike and cmf_val is not None and cmf_val > 0:
+                    volume_signal = "🚀 انفجار حجم + CMF إيجابي — إشارة دخول قوية"
+                elif vol_spike:
+                    volume_signal = "⚠️ انفجار حجم لكن CMF غير إيجابي"
+                else:
+                    volume_signal = "📊 لا يوجد انفجار حجم ملحوظ"
+
                 # 📈 المؤشرات الفنية الإضافية
                 closes = fill_gaps(quote.get('close', []))
-                volumes = fill_gaps(quote.get('volume', []))
 
                 rsi_val = rsi(closes)
                 macd_line, macd_signal, macd_hist = compute_macd(closes)
@@ -295,6 +332,8 @@ async def fetch_analysis(symbol, type_label="تحليل"):
                     "t1": round(price * 1.015, 2), "t2": round(price * 1.038, 2), "t3": round(price * 1.06, 2),
                     "stop": round(price * 0.96, 2),
                     "vwap": round(vwap, 2), "vwap_dist": round(vwap_dist, 2), "vwap_signal": vwap_signal,
+                    "current_volume": int(curr_vol), "volume_avg": int(avg_vol), "volume_ratio": round(vol_ratio, 2),
+                    "cmf": round(cmf_val, 3) if cmf_val is not None else "N/A", "volume_signal": volume_signal,
                     "rsi": round(rsi_val, 2) if rsi_val is not None else "N/A",
                     "macd": round(macd_line, 3) if macd_line is not None else "N/A",
                     "macd_signal": round(macd_signal, 3) if macd_signal is not None else "N/A",
@@ -326,6 +365,13 @@ def format_report(d):
             f"📊 **VWAP**\n"
             f"`${d['vwap']}` ({d['vwap_dist']}%)\n"
             f"{d['vwap_signal']}\n"
+            f"───────────────────\n"
+            f"🚀 **انفجار الحجم + CMF**\n"
+            f"• **الحجم الحالي:** `{d['current_volume']}`\n"
+            f"• **متوسط 20:** `{d['volume_avg']}`\n"
+            f"• **النسبة:** `{d['volume_ratio']}x`\n"
+            f"• **CMF(20):** `{d['cmf']}`\n"
+            f"{d['volume_signal']}\n"
             f"───────────────────\n"
             f"📈 **المؤشرات الفنية**\n"
             f"• **RSI(14):** `{d['rsi']}`\n"
